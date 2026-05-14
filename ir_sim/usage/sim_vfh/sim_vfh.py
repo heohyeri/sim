@@ -50,6 +50,11 @@ oscillation_min_target_progress = vfh_config.get('oscillation_min_target_progres
 immobility_max_travel = vfh_config.get('immobility_max_travel', 0.4)
 immobility_max_avg_speed = vfh_config.get('immobility_max_avg_speed', 0.25)
 immobility_min_target_progress = vfh_config.get('immobility_min_target_progress', 0.3)
+low_progress_min_travel = vfh_config.get('low_progress_min_travel', 0.8)
+low_progress_ratio = vfh_config.get('low_progress_ratio', 0.15)
+escape_distance = vfh_config.get('escape_distance', 10.0)
+escape_reached_distance = vfh_config.get('escape_reached_distance', 2.0)
+escape_timeout_steps = vfh_config.get('escape_timeout_steps', 80)
 world_width = config.get('world', {}).get('world_width', 180)
 world_height = config.get('world', {}).get('world_height', 180)
 world_offset_x = config.get('world', {}).get('offset_x', 0)
@@ -502,6 +507,23 @@ def robot_is_immobile(robot):
     )
 
 
+def robot_has_low_target_progress(robot):
+    history = getattr(robot, 'oscillation_history', [])
+
+    if len(history) < oscillation_window:
+        return False
+
+    start_pos, start_target_distance, _, _ = history[0]
+    end_pos, end_target_distance, _, _ = history[-1]
+    traveled = np.linalg.norm(end_pos - start_pos)
+    target_progress = start_target_distance - end_target_distance
+
+    if traveled < low_progress_min_travel:
+        return False
+
+    return target_progress / max(traveled, 1e-6) < low_progress_ratio
+
+
 def angle_to_sector(angle):
     sector_angle = 2 * np.pi / vfh_sector_count
     return int(np.floor((to_pi(angle) + np.pi) / sector_angle)) % vfh_sector_count
@@ -556,6 +578,31 @@ def find_open_valleys(blocked):
         valleys.append((current_start, end, current_width))
 
     return valleys
+
+
+def valley_mid_sector(valley):
+    start, _, width = valley
+    return (start + width // 2) % vfh_sector_count
+
+
+def sample_escape_target(robot, pos):
+    histogram, _ = build_vfh_histogram(robot)
+    blocked = histogram > vfh_threshold
+    valleys = find_open_valleys(blocked)
+
+    if valleys:
+        best_valley = max(valleys, key=lambda valley: valley[2])
+        escape_heading = sector_to_angle(valley_mid_sector(best_valley))
+    else:
+        escape_heading = robot.state[2, 0] + np.pi
+
+    escape_target = pos + escape_distance * np.array([
+        np.cos(escape_heading),
+        np.sin(escape_heading)
+    ])
+    world_min = np.array([world_offset_x, world_offset_y]) + getattr(robot, 'radius', 0.0) + wall_stop_margin
+    world_max = np.array([world_offset_x + world_width, world_offset_y + world_height]) - getattr(robot, 'radius', 0.0) - wall_stop_margin
+    return np.clip(escape_target, world_min, world_max)
 
 
 def build_vfh_histogram(robot):
@@ -768,7 +815,7 @@ def robot_step_omni_drive(robot_list, vel_list):
         robot.arrive()
 
 
-target_points = generate_target_points(count=20)
+target_points = generate_target_points(count=100)
 target_colors = ['yellow'] * len(target_points)
 target_plot = None
 
@@ -784,6 +831,8 @@ for robot in env.robot_list:
     robot.blocked_targets = {}
     robot.stuck_history = []
     robot.oscillation_history = []
+    robot.escape_target = None
+    robot.escape_start_step = 0
 
 simulation_start_time = time.perf_counter()
 
@@ -809,11 +858,21 @@ for i in range(15000):
 
         target = None
         target_idx = None
-        if len(robot.visited_points) < len(target_points):
+        if robot.escape_target is not None:
+            escape_reached = np.linalg.norm(robot.escape_target - pos) < escape_reached_distance
+            escape_timed_out = i - robot.escape_start_step > escape_timeout_steps
+            if escape_reached or escape_timed_out:
+                robot.escape_target = None
+                robot.stuck_history = []
+                robot.oscillation_history = []
+            else:
+                target = robot.escape_target
+
+        if target is None and len(robot.visited_points) < len(target_points):
             target_idx = select_cluster_target(robot, pos, target_points, i)
             if target_idx is not None:
                 target = target_points[target_idx]
-        else:
+        elif target is None:
             if np.linalg.norm(robot.patrol_target - pos) < 3.0:
                 robot.patrol_target = sample_patrol_point()
             target = robot.patrol_target
@@ -822,23 +881,31 @@ for i in range(15000):
             update_stuck_history(robot, pos, target)
             if robot_is_stuck(robot):
                 robot.blocked_targets[target_idx] = i + target_block_duration
+                robot.escape_target = sample_escape_target(robot, pos)
+                robot.escape_start_step = i
                 robot.stuck_history = []
                 robot.oscillation_history = []
-                target_idx = select_cluster_target(robot, pos, target_points, i)
-                target = target_points[target_idx] if target_idx is not None else None
+                target = robot.escape_target
+                target_idx = None
         
 
         if target is not None:
             vel = compute_avoidance_command(robot, target, pos)
             if target_idx is not None:
                 update_oscillation_history(robot, pos, target, vel)
-                if robot_is_oscillating(robot) or robot_is_immobile(robot):
+                if (
+                    robot_is_oscillating(robot)
+                    or robot_is_immobile(robot)
+                    or robot_has_low_target_progress(robot)
+                ):
                     robot.blocked_targets[target_idx] = i + target_block_duration
+                    robot.escape_target = sample_escape_target(robot, pos)
+                    robot.escape_start_step = i
                     robot.stuck_history = []
                     robot.oscillation_history = []
-                    target_idx = select_cluster_target(robot, pos, target_points, i)
-                    target = target_points[target_idx] if target_idx is not None else None
-                    vel = compute_avoidance_command(robot, target, pos) if target is not None else np.array([0.0, 0.0])
+                    target = robot.escape_target
+                    target_idx = None
+                    vel = compute_avoidance_command(robot, target, pos)
         else:
 
             vel = np.array([0.0, 0.0])

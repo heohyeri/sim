@@ -15,7 +15,7 @@ robots:
   vel_max: [8.0, 4.5]
   lidar2d:
     id_list: [0, 1, 2, 3, 4, 5]
-    range_max: 12.0
+    range_max: 16.0
     number: 30
     noise: false
     angle_min: -3.14
@@ -42,7 +42,7 @@ vfh_plus:
   wall_stop_margin: 0.05
   use_omni_drive: true
   stuck_window: 35
-  stuck_min_travel: 2.0
+  stuck_min_travel: 1.0
   stuck_min_target_progress: 0.5
   target_block_duration: 300
   oscillation_window: 30
@@ -52,6 +52,11 @@ vfh_plus:
   immobility_max_travel: 0.4
   immobility_max_avg_speed: 0.25
   immobility_min_target_progress: 0.3
+  low_progress_min_travel: 0.8
+  low_progress_ratio: 0.15
+  escape_distance: 10.0
+  escape_reached_distance: 2.0
+  escape_timeout_steps: 80
 
 obs_lines:
   number: 27
