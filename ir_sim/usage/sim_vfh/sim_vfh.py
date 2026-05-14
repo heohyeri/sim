@@ -39,9 +39,6 @@ use_omni_drive = vfh_config.get('use_omni_drive', False)
 min_escape_speed = vfh_config.get('min_speed', 1.2)
 rendezvous_cooldown = 3.0
 min_new_shared_points_for_recluster = 2
-hint_distance_weight = 0.75
-opportunistic_switch_ratio = 0.55
-opportunistic_capture_range = 6.0
 stuck_window = vfh_config.get('stuck_window', 35)
 stuck_min_travel = vfh_config.get('stuck_min_travel', 1.0)
 stuck_min_target_progress = vfh_config.get('stuck_min_target_progress', 0.5)
@@ -370,7 +367,7 @@ def reassign_targets_for_rendezvous(event, robot_list, target_points, iteration)
     }
 
 
-def select_target_with_hints(robot, pos, target_points, iteration):
+def select_cluster_target(robot, pos, target_points, iteration):
     blocked_targets = getattr(robot, 'blocked_targets', {})
     robot.blocked_targets = {
         idx: unblock_step
@@ -378,10 +375,15 @@ def select_target_with_hints(robot, pos, target_points, iteration):
         if unblock_step > iteration and idx not in robot.visited_points
     }
 
-    remaining_indices = [
+    available_indices = [
         idx for idx in range(len(target_points))
         if idx not in robot.visited_points and idx not in robot.blocked_targets
     ]
+    assigned_indices = [
+        idx for idx in getattr(robot, 'assigned_targets', [])
+        if idx in available_indices
+    ]
+    remaining_indices = assigned_indices if assigned_indices else available_indices
 
     if not remaining_indices:
         remaining_indices = [
@@ -392,42 +394,10 @@ def select_target_with_hints(robot, pos, target_points, iteration):
     if not remaining_indices:
         return None
 
-    nearest_global_idx = min(
+    return min(
         remaining_indices,
         key=lambda idx: np.linalg.norm(target_points[idx] - pos)
     )
-    nearest_global_dist = np.linalg.norm(target_points[nearest_global_idx] - pos)
-
-    assigned_candidates = [
-        idx for idx in robot.assigned_targets
-        if idx in remaining_indices
-    ]
-
-    if assigned_candidates:
-        nearest_assigned_idx = min(
-            assigned_candidates,
-            key=lambda idx: np.linalg.norm(target_points[idx] - pos)
-        )
-        nearest_assigned_dist = np.linalg.norm(target_points[nearest_assigned_idx] - pos)
-
-        # Treat cluster output as a preference, not a hard constraint.
-        if (
-            nearest_global_idx != nearest_assigned_idx
-            and nearest_global_dist <= opportunistic_capture_range
-            and nearest_global_dist < opportunistic_switch_ratio * nearest_assigned_dist
-        ):
-            return nearest_global_idx
-
-    assigned_set = set(assigned_candidates)
-    best_idx = min(
-        remaining_indices,
-        key=lambda idx: (
-            np.linalg.norm(target_points[idx] - pos) * hint_distance_weight
-            if idx in assigned_set
-            else np.linalg.norm(target_points[idx] - pos)
-        )
-    )
-    return best_idx
 
 
 def sample_patrol_point(world_size=(180, 180), margin=8.0):
@@ -840,7 +810,7 @@ for i in range(15000):
         target = None
         target_idx = None
         if len(robot.visited_points) < len(target_points):
-            target_idx = select_target_with_hints(robot, pos, target_points, i)
+            target_idx = select_cluster_target(robot, pos, target_points, i)
             if target_idx is not None:
                 target = target_points[target_idx]
         else:
@@ -854,7 +824,7 @@ for i in range(15000):
                 robot.blocked_targets[target_idx] = i + target_block_duration
                 robot.stuck_history = []
                 robot.oscillation_history = []
-                target_idx = select_target_with_hints(robot, pos, target_points, i)
+                target_idx = select_cluster_target(robot, pos, target_points, i)
                 target = target_points[target_idx] if target_idx is not None else None
         
 
@@ -866,7 +836,7 @@ for i in range(15000):
                     robot.blocked_targets[target_idx] = i + target_block_duration
                     robot.stuck_history = []
                     robot.oscillation_history = []
-                    target_idx = select_target_with_hints(robot, pos, target_points, i)
+                    target_idx = select_cluster_target(robot, pos, target_points, i)
                     target = target_points[target_idx] if target_idx is not None else None
                     vel = compute_avoidance_command(robot, target, pos) if target is not None else np.array([0.0, 0.0])
         else:
