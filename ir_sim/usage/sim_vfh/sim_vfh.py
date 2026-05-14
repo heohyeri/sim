@@ -48,6 +48,17 @@ stuck_window = vfh_config.get('stuck_window', 35)
 stuck_min_travel = vfh_config.get('stuck_min_travel', 1.0)
 stuck_min_target_progress = vfh_config.get('stuck_min_target_progress', 0.5)
 target_block_duration = vfh_config.get('target_block_duration', 300)
+oscillation_window = vfh_config.get('oscillation_window', 30)
+oscillation_min_flips = vfh_config.get('oscillation_min_flips', 8)
+oscillation_max_travel = vfh_config.get('oscillation_max_travel', 2.0)
+oscillation_min_target_progress = vfh_config.get('oscillation_min_target_progress', 0.5)
+immobility_max_travel = vfh_config.get('immobility_max_travel', 0.4)
+immobility_max_avg_speed = vfh_config.get('immobility_max_avg_speed', 0.25)
+immobility_min_target_progress = vfh_config.get('immobility_min_target_progress', 0.3)
+world_width = config.get('world', {}).get('world_width', 180)
+world_height = config.get('world', {}).get('world_height', 180)
+world_offset_x = config.get('world', {}).get('offset_x', 0)
+world_offset_y = config.get('world', {}).get('offset_y', 0)
 
 def point_to_segment_distance(point, segment):
     start = np.array(segment[:2], dtype=float)
@@ -459,6 +470,70 @@ def robot_is_stuck(robot):
     return traveled < stuck_min_travel and target_progress < stuck_min_target_progress
 
 
+def update_oscillation_history(robot, pos, target, vel):
+    target_offset = target - pos
+    target_distance = np.linalg.norm(target_offset)
+    speed = np.linalg.norm(vel)
+    side = 0
+
+    if target_distance > 1e-6 and speed > 1e-6:
+        target_angle = np.arctan2(target_offset[1], target_offset[0])
+        move_angle = np.arctan2(vel[1], vel[0])
+        angle_error = to_pi(move_angle - target_angle)
+        if abs(angle_error) > 0.1:
+            side = 1 if angle_error > 0 else -1
+
+    history = getattr(robot, 'oscillation_history', [])
+    history.append((pos.copy(), target_distance, side, speed))
+
+    if len(history) > oscillation_window:
+        history = history[-oscillation_window:]
+
+    robot.oscillation_history = history
+
+
+def robot_is_oscillating(robot):
+    history = getattr(robot, 'oscillation_history', [])
+
+    if len(history) < oscillation_window:
+        return False
+
+    start_pos, start_target_distance, _, _ = history[0]
+    end_pos, end_target_distance, _, _ = history[-1]
+    traveled = np.linalg.norm(end_pos - start_pos)
+    target_progress = start_target_distance - end_target_distance
+    sides = [side for _, _, side, _ in history if side != 0]
+
+    if len(sides) < 2:
+        return False
+
+    flips = sum(1 for prev, cur in zip(sides, sides[1:]) if prev != cur)
+    return (
+        flips >= oscillation_min_flips
+        and traveled < oscillation_max_travel
+        and target_progress < oscillation_min_target_progress
+    )
+
+
+def robot_is_immobile(robot):
+    history = getattr(robot, 'oscillation_history', [])
+
+    if len(history) < oscillation_window:
+        return False
+
+    start_pos, start_target_distance, _, _ = history[0]
+    end_pos, end_target_distance, _, _ = history[-1]
+    traveled = np.linalg.norm(end_pos - start_pos)
+    target_progress = start_target_distance - end_target_distance
+    avg_speed = np.mean([speed for _, _, _, speed in history])
+
+    return (
+        traveled < immobility_max_travel
+        and avg_speed < immobility_max_avg_speed
+        and target_progress < immobility_min_target_progress
+    )
+
+
 def angle_to_sector(angle):
     sector_angle = 2 * np.pi / vfh_sector_count
     return int(np.floor((to_pi(angle) + np.pi) / sector_angle)) % vfh_sector_count
@@ -616,8 +691,25 @@ def safe_linear_speed(robot, linear_speed, heading, angular_speed=0.0):
     pos = np.squeeze(robot.state[0:2])
     step_time = getattr(robot, 'step_time', env.step_time)
     mid_heading = heading + 0.5 * angular_speed * step_time
+    direction = np.array([np.cos(mid_heading), np.sin(mid_heading)])
+    world_min = np.array([world_offset_x, world_offset_y]) + getattr(robot, 'radius', 0.0) + wall_stop_margin
+    world_max = np.array([world_offset_x + world_width, world_offset_y + world_height]) - getattr(robot, 'radius', 0.0) - wall_stop_margin
+    max_boundary_travel = np.inf
+
+    for axis in range(2):
+        if direction[axis] > 1e-9:
+            max_boundary_travel = min(max_boundary_travel, (world_max[axis] - pos[axis]) / direction[axis])
+        elif direction[axis] < -1e-9:
+            max_boundary_travel = min(max_boundary_travel, (world_min[axis] - pos[axis]) / direction[axis])
+
+    if max_boundary_travel <= 0:
+        return 0.0
+
+    if np.isfinite(max_boundary_travel):
+        linear_speed = min(linear_speed, max_boundary_travel / step_time)
+
     travel = linear_speed * step_time + getattr(robot, 'radius', 0.0) + wall_stop_margin
-    next_pos = pos + travel * np.array([np.cos(mid_heading), np.sin(mid_heading)])
+    next_pos = pos + travel * direction
     motion_segment = [pos, next_pos]
     nearest_hit_range = None
 
@@ -691,11 +783,18 @@ def robot_step_omni_drive(robot_list, vel_list):
         if vel.shape == (2,):
             vel = vel[:, np.newaxis]
 
-        vel = np.clip(vel, -robot.vel_max, robot.vel_max)
-        robot.previous_state = robot.state.copy()
-        robot.state[0:2] = robot.state[0:2] + vel * robot.step_time
-
         speed = np.linalg.norm(vel)
+        speed_limit = robot.vel_max[0, 0]
+        if speed > speed_limit:
+            vel = vel / speed * speed_limit
+            speed = speed_limit
+
+        robot.previous_state = robot.state.copy()
+        next_pos = robot.state[0:2] + vel * robot.step_time
+        world_min = np.array([[world_offset_x], [world_offset_y]]) + robot.radius
+        world_max = np.array([[world_offset_x + world_width], [world_offset_y + world_height]]) - robot.radius
+        robot.state[0:2] = np.clip(next_pos, world_min, world_max)
+
         if speed > 1e-6:
             robot.state[2, 0] = to_pi(np.arctan2(vel[1, 0], vel[0, 0]))
 
@@ -719,6 +818,7 @@ for robot in env.robot_list:
     robot.last_shared_points_count = 0
     robot.blocked_targets = {}
     robot.stuck_history = []
+    robot.oscillation_history = []
 
 simulation_start_time = time.perf_counter()
 
@@ -758,12 +858,22 @@ for i in range(15000):
             if robot_is_stuck(robot):
                 robot.blocked_targets[target_idx] = i + target_block_duration
                 robot.stuck_history = []
+                robot.oscillation_history = []
                 target_idx = select_target_with_hints(robot, pos, target_points, i)
                 target = target_points[target_idx] if target_idx is not None else None
         
 
         if target is not None:
             vel = compute_avoidance_command(robot, target, pos)
+            if target_idx is not None:
+                update_oscillation_history(robot, pos, target, vel)
+                if robot_is_oscillating(robot) or robot_is_immobile(robot):
+                    robot.blocked_targets[target_idx] = i + target_block_duration
+                    robot.stuck_history = []
+                    robot.oscillation_history = []
+                    target_idx = select_target_with_hints(robot, pos, target_points, i)
+                    target = target_points[target_idx] if target_idx is not None else None
+                    vel = compute_avoidance_command(robot, target, pos) if target is not None else np.array([0.0, 0.0])
         else:
 
             vel = np.array([0.0, 0.0])

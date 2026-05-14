@@ -45,6 +45,13 @@ vfh_plus:
   stuck_min_travel: 2.0
   stuck_min_target_progress: 0.5
   target_block_duration: 300
+  oscillation_window: 30
+  oscillation_min_flips: 8
+  oscillation_max_travel: 2.0
+  oscillation_min_target_progress: 0.5
+  immobility_max_travel: 0.4
+  immobility_max_avg_speed: 0.25
+  immobility_min_target_progress: 0.3
 
 obs_lines:
   number: 27
