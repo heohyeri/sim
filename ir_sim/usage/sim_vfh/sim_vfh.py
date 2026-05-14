@@ -37,6 +37,7 @@ vfh_slowdown_gain = vfh_config.get('slowdown_gain', 0.3)
 vfh_max_heading_step = vfh_config.get('max_heading_step', 0.45)
 diff_turn_time = vfh_config.get('diff_turn_time', 0.25)
 wall_stop_margin = vfh_config.get('wall_stop_margin', 0.3)
+use_omni_drive = vfh_config.get('use_omni_drive', False)
 min_escape_speed = vfh_config.get('min_speed', 1.2)
 rendezvous_cooldown = 3.0
 min_new_shared_points_for_recluster = 2
@@ -566,13 +567,13 @@ def clearance_along_heading(robot, heading):
     return nearest_clearance
 
 
-def safe_linear_speed(robot, linear_speed, angular_speed):
+def safe_linear_speed(robot, linear_speed, heading, angular_speed=0.0):
     if linear_speed <= 0:
         return 0.0
 
     pos = np.squeeze(robot.state[0:2])
     step_time = getattr(robot, 'step_time', env.step_time)
-    mid_heading = robot.state[2, 0] + 0.5 * angular_speed * step_time
+    mid_heading = heading + 0.5 * angular_speed * step_time
     travel = linear_speed * step_time + getattr(robot, 'radius', 0.0) + wall_stop_margin
     next_pos = pos + travel * np.array([np.cos(mid_heading), np.sin(mid_heading)])
     motion_segment = [pos, next_pos]
@@ -629,15 +630,36 @@ def compute_avoidance_command(robot, target, pos):
     speed_cap = max(min_escape_speed, speed_cap)
     desired_speed = min(speed_cap, max(min_escape_speed, approach_gain * dist_to_target))
 
-    if robot.mode == 'diff':
+    if robot.mode == 'diff' and not use_omni_drive:
         heading_error = to_pi(selected_heading - robot.state[2, 0])
         w_max = robot.vel_max[1, 0]
         angular_speed = np.clip(heading_error / diff_turn_time, -w_max, w_max)
-        linear_speed = safe_linear_speed(robot, desired_speed, angular_speed)
+        linear_speed = safe_linear_speed(robot, desired_speed, robot.state[2, 0], angular_speed)
 
         return np.array([linear_speed, angular_speed])
 
-    return desired_speed * np.array([np.cos(selected_heading), np.sin(selected_heading)])
+    linear_speed = safe_linear_speed(robot, desired_speed, selected_heading)
+    return linear_speed * np.array([np.cos(selected_heading), np.sin(selected_heading)])
+
+
+def robot_step_omni_drive(robot_list, vel_list):
+    for robot, vel in zip(robot_list, vel_list):
+        if isinstance(vel, list):
+            vel = np.array(vel, ndmin=2).T
+        if vel.shape == (2,):
+            vel = vel[:, np.newaxis]
+
+        vel = np.clip(vel, -robot.vel_max, robot.vel_max)
+        robot.previous_state = robot.state.copy()
+        robot.state[0:2] = robot.state[0:2] + vel * robot.step_time
+
+        speed = np.linalg.norm(vel)
+        if speed > 1e-6:
+            robot.state[2, 0] = to_pi(np.arctan2(vel[1, 0], vel[0, 0]))
+
+        robot.vel_omni = vel
+        robot.vel_diff = np.array([[speed], [0.0]])
+        robot.arrive()
 
 
 target_points = generate_target_points(count=20)
@@ -715,7 +737,10 @@ for i in range(15000):
             f"reclustered remaining {reassignment['remaining_count']} with K={reassignment['cluster_count']}"
         )
 
-    env.robot_step(vel_list, vel_type='diff', stop=False)
+    if use_omni_drive:
+        robot_step_omni_drive(env.robot_list, vel_list)
+    else:
+        env.robot_step(vel_list, vel_type='diff', stop=False)
     env.collision_check()
 
     if i % render_interval == 0:

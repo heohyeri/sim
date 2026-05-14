@@ -24,22 +24,23 @@ robots:
 vfh_plus:
   sector_count: 72
   detection_range: 8.0
-  safety_distance: 0.8
-  histogram_threshold: 0.35
-  wide_valley_width: 12
-  boundary_margin: 3
+  safety_distance: 0.4
+  histogram_threshold: 0.5
+  wide_valley_width: 8
+  boundary_margin: 1
   cruise_speed: 8.0
   approach_gain: 1.5
   min_speed: 1.2
   slowdown_distance: 4.0
   target_weight: 5.0
-  current_weight: 2.0
-  previous_weight: 2.0
+  current_weight: 1.0
+  previous_weight: 0.8
   slowdown_gain: 0.15
   slowdown_heading_window: 1.047
   max_heading_step: 0.75
   diff_turn_time: 0.25
   wall_stop_margin: 0.1
+  use_omni_drive: true
 
 obs_lines:
   number: 27
