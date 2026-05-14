@@ -41,6 +41,10 @@ vfh_plus:
   diff_turn_time: 0.25
   wall_stop_margin: 0.1
   use_omni_drive: true
+  stuck_window: 35
+  stuck_min_travel: 2.0
+  stuck_min_target_progress: 0.5
+  target_block_duration: 300
 
 obs_lines:
   number: 27

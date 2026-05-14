@@ -44,6 +44,10 @@ min_new_shared_points_for_recluster = 2
 hint_distance_weight = 0.75
 opportunistic_switch_ratio = 0.55
 opportunistic_capture_range = 6.0
+stuck_window = vfh_config.get('stuck_window', 35)
+stuck_min_travel = vfh_config.get('stuck_min_travel', 1.0)
+stuck_min_target_progress = vfh_config.get('stuck_min_target_progress', 0.5)
+target_block_duration = vfh_config.get('target_block_duration', 300)
 
 def point_to_segment_distance(point, segment):
     start = np.array(segment[:2], dtype=float)
@@ -357,11 +361,24 @@ def reassign_targets_for_rendezvous(event, robot_list, target_points, iteration)
     }
 
 
-def select_target_with_hints(robot, pos, target_points):
+def select_target_with_hints(robot, pos, target_points, iteration):
+    blocked_targets = getattr(robot, 'blocked_targets', {})
+    robot.blocked_targets = {
+        idx: unblock_step
+        for idx, unblock_step in blocked_targets.items()
+        if unblock_step > iteration and idx not in robot.visited_points
+    }
+
     remaining_indices = [
         idx for idx in range(len(target_points))
-        if idx not in robot.visited_points
+        if idx not in robot.visited_points and idx not in robot.blocked_targets
     ]
+
+    if not remaining_indices:
+        remaining_indices = [
+            idx for idx in range(len(target_points))
+            if idx not in robot.visited_points
+        ]
 
     if not remaining_indices:
         return None
@@ -390,7 +407,7 @@ def select_target_with_hints(robot, pos, target_points):
             and nearest_global_dist <= opportunistic_capture_range
             and nearest_global_dist < opportunistic_switch_ratio * nearest_assigned_dist
         ):
-            return target_points[nearest_global_idx]
+            return nearest_global_idx
 
     assigned_set = set(assigned_candidates)
     best_idx = min(
@@ -401,7 +418,7 @@ def select_target_with_hints(robot, pos, target_points):
             else np.linalg.norm(target_points[idx] - pos)
         )
     )
-    return target_points[best_idx]
+    return best_idx
 
 
 def sample_patrol_point(world_size=(180, 180), margin=8.0):
@@ -415,6 +432,31 @@ def sample_patrol_point(world_size=(180, 180), margin=8.0):
             seed=None
         )[0]
         return candidate
+
+
+def update_stuck_history(robot, pos, target):
+    target_distance = np.linalg.norm(target - pos)
+    history = getattr(robot, 'stuck_history', [])
+    history.append((pos.copy(), target_distance))
+
+    if len(history) > stuck_window:
+        history = history[-stuck_window:]
+
+    robot.stuck_history = history
+
+
+def robot_is_stuck(robot):
+    history = getattr(robot, 'stuck_history', [])
+
+    if len(history) < stuck_window:
+        return False
+
+    start_pos, start_target_distance = history[0]
+    end_pos, end_target_distance = history[-1]
+    traveled = np.linalg.norm(end_pos - start_pos)
+    target_progress = start_target_distance - end_target_distance
+
+    return traveled < stuck_min_travel and target_progress < stuck_min_target_progress
 
 
 def angle_to_sector(angle):
@@ -675,6 +717,8 @@ for robot in env.robot_list:
     robot.last_recluster_group = tuple()
     robot.last_recluster_time = -np.inf
     robot.last_shared_points_count = 0
+    robot.blocked_targets = {}
+    robot.stuck_history = []
 
 simulation_start_time = time.perf_counter()
 
@@ -699,12 +743,23 @@ for i in range(15000):
         ]
 
         target = None
+        target_idx = None
         if len(robot.visited_points) < len(target_points):
-            target = select_target_with_hints(robot, pos, target_points)
+            target_idx = select_target_with_hints(robot, pos, target_points, i)
+            if target_idx is not None:
+                target = target_points[target_idx]
         else:
             if np.linalg.norm(robot.patrol_target - pos) < 3.0:
                 robot.patrol_target = sample_patrol_point()
             target = robot.patrol_target
+
+        if target is not None and target_idx is not None:
+            update_stuck_history(robot, pos, target)
+            if robot_is_stuck(robot):
+                robot.blocked_targets[target_idx] = i + target_block_duration
+                robot.stuck_history = []
+                target_idx = select_target_with_hints(robot, pos, target_points, i)
+                target = target_points[target_idx] if target_idx is not None else None
         
 
         if target is not None:
