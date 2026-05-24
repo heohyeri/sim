@@ -7,7 +7,7 @@ from pathlib import Path
 import yaml
 
 
-CONFIG_PATH = Path(__file__).with_name('sim_vfh.yaml')
+CONFIG_PATH = Path(__file__).with_name('vfh.yaml')
 
 
 def load_config(path):
@@ -18,7 +18,7 @@ def load_config(path):
 config = load_config(CONFIG_PATH)
 vfh_config = config.get('vfh_plus', {})
 
-env = env_base('sim_vfh.yaml', figsize=(19.2, 19.2))
+env = env_base('vfh.yaml', figsize=(19.2, 19.2))
 cruise_speed = vfh_config.get('cruise_speed', 7.0)
 approach_gain = vfh_config.get('approach_gain', 1.5)
 render_interval = 2
