@@ -42,6 +42,8 @@ min_new_shared_points_for_recluster = 2
 hint_distance_weight = 0.75
 opportunistic_switch_ratio = 0.55
 opportunistic_capture_range = 6.0
+target_visit_radius = vfh_config.get('target_visit_radius', 2.0)
+nearby_target_priority_radius = vfh_config.get('nearby_target_priority_radius', 6.0)
 stuck_window = vfh_config.get('stuck_window', 35)
 stuck_min_travel = vfh_config.get('stuck_min_travel', 1.0)
 stuck_min_target_progress = vfh_config.get('stuck_min_target_progress', 0.5)
@@ -382,6 +384,18 @@ def select_target_with_hints(robot, pos, target_points, iteration):
         for idx, unblock_step in blocked_targets.items()
         if unblock_step > iteration and idx not in robot.visited_points
     }
+
+    nearby_indices = [
+        idx for idx in range(len(target_points))
+        if idx not in robot.visited_points
+        and np.linalg.norm(target_points[idx] - pos) <= nearby_target_priority_radius
+    ]
+
+    if nearby_indices:
+        return min(
+            nearby_indices,
+            key=lambda idx: np.linalg.norm(target_points[idx] - pos)
+        )
 
     available_indices = [
         idx for idx in range(len(target_points))
@@ -877,7 +891,7 @@ for i in range(15000):
         
 
         for p_idx, pt in enumerate(target_points):
-            if np.linalg.norm(pos - pt) < 1.2:
+            if np.linalg.norm(pos - pt) < target_visit_radius:
                 robot.visited_points.add(p_idx)
 
         robot.assigned_targets = [
